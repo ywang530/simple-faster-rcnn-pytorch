@@ -2,9 +2,12 @@ from __future__ import  absolute_import
 import torch as t
 from torch import nn
 from torchvision.models import vgg16
+from torchvision.models import vgg19
+from torchvision.models import resnet101
 from torchvision.ops import RoIPool
 
-from model.region_proposal_network import RegionProposalNetwork
+from model.rpn import Region_Proposal_Network
+#from model.region_proposal_network import RegionProposalNetwork
 from model.faster_rcnn import FasterRCNN
 from utils import array_tool as at
 from utils.config import opt
@@ -36,6 +39,55 @@ def decom_vgg16():
 
     return nn.Sequential(*features), classifier
 
+def decom_vgg19():
+    # the 35th layer of features is relu of conv5_3
+    if opt.caffe_pretrain:
+        model = vgg19(pretrained=False)
+        if not opt.load_path:
+            model.load_state_dict(t.load(opt.caffe_pretrain_path))
+    else:
+        model = vgg19(not opt.load_path)
+
+    features = list(model.features)[:35]
+    classifier = model.classifier
+
+    classifier = list(classifier)
+    del classifier[6]
+    if not opt.use_drop:
+        del classifier[5]
+        del classifier[2]
+    classifier = nn.Sequential(*classifier)
+
+    # freeze top4 conv
+    for layer in features[:10]:
+        for p in layer.parameters():
+            p.requires_grad = False
+
+    return nn.Sequential(*features), classifier
+
+def decom_res101():
+    res18 = resnet101(pretrained=False)
+    new_res = list(res18.children())[:-3]
+    conv_layer1 = nn.Sequential(
+            nn.Conv2d(in_channels=1024, out_channels=512, kernel_size=3,stride=1,padding=1),
+            nn.BatchNorm2d(num_features=512),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels=512, out_channels=512, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(num_features=512)
+        )
+    
+    conv = nn.Sequential(conv_layer1)
+    for layer in new_res[:5]:
+        for p in layer.parameters():
+            p.requires_grad = False
+    features = nn.Sequential(*new_res, conv)
+    classifier = nn.Sequential(
+        nn.Linear(in_features=25088, out_features=4096, bias=True),
+        nn.ReLU(inplace=True),
+        nn.Linear(in_features=4096, out_features=4096, bias=True),
+        nn.ReLU(inplace=True)
+    )
+    return features, classifier
 
 class FasterRCNNVGG16(FasterRCNN):
     """Faster R-CNN based on VGG-16.
@@ -61,13 +113,14 @@ class FasterRCNNVGG16(FasterRCNN):
                  anchor_scales=[8, 16, 32]
                  ):
                  
-        extractor, classifier = decom_vgg16()
+        extractor, classifier = decom_vgg19()
 
-        rpn = RegionProposalNetwork(
+        rpn = Region_Proposal_Network(
             512, 512,
+            subsampling = 16,
+            scales=anchor_scales,
             ratios=ratios,
-            anchor_scales=anchor_scales,
-            feat_stride=self.feat_stride,
+            stride = 16
         )
 
         head = VGG16RoIHead(
